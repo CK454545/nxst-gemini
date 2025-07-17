@@ -2,17 +2,15 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 
+// === ENV ET CONFIG ===
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SALONS_AUTORISES = process.env.SALONS_AUTORISES
   ? process.env.SALONS_AUTORISES.split(',').map(s => s.trim())
   : [];
-
 const MEMOIRE_PAR_USER = 15;
-const memoire = {};
 
-// Liste des salons et mapping ID/nom
+// === SALONS INFOS ===
 const salonsInfos = [
   { nom: 'annonce', id: '1394657978904481842' },
   { nom: 'reglement', id: '1394657980204716184' },
@@ -36,20 +34,11 @@ const salonsInfos = [
   { nom: 'passer commande', id: '1394658057811792124' },
   { nom: 'ticket support', id: '1394658026119761950' }
 ];
-
 const salonsNomVersLien = {};
 salonsInfos.forEach(s => salonsNomVersLien[s.nom.toLowerCase()] = `<#${s.id}>`);
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
-});
-
-// Mémoire par user
+// === MÉMOIRE UTILISATEUR ===
+const memoire = {};
 function addMemoire(userId, content, channel) {
   if (!memoire[userId]) memoire[userId] = [];
   memoire[userId].push({ content, date: new Date(), channel });
@@ -59,37 +48,60 @@ function addMemoire(userId, content, channel) {
 }
 function getMemoire(userId) {
   if (!memoire[userId]) return "";
-  return memoire[userId].map(m => `Dans #${m.channel} : ${m.content}`).join('\n');
+  return memoire[userId].map(m => `[${m.channel}] ${m.content}`).join('\n');
 }
 
-// Question ou besoin
+// === FILTRE ULTRA-INTELLIGENT (pas de spam sur bavardage) ===
 function isQuestionOrNeed(message) {
-  const triggers = [
-    '?', 'comment', 'pourquoi', 'peux-tu', 'peut-on', 'possible', 'où', 'quelle', 'quand', 'aide', 'info', 'besoin', 'aidez-moi', 'help', 'rp', 'gta', 'bug', 'ticket', 'demande'
+  const content = message.content.toLowerCase().trim();
+
+  // Trop court ou vide
+  if (content.length < 12) return false;
+
+  // Blacklist ultra large
+  const blacklist = [
+    'salut', 'bonjour', 'coucou', 'wesh', 're', 'yo', 'bienvenue', 'merci', 'gg', 'bonne nuit', 'bonne soirée',
+    'a+', 'lol', 'mdr', 'ptdr', 'ok', 'yes', 'ouais', 'ça va', 'ça roule', 'à demain', 'bien ou quoi', 'force à vous',
+    'bien joué', 'bonne chance', 'mdrr', 'ouais ouais', 'bien vu', 'yo tout le monde', 'bjr', 'bnj', 'slt', 'c bon', 'je suis là'
   ];
-  const content = message.content.toLowerCase();
-  return triggers.some(trigger => content.includes(trigger));
+  if (blacklist.some(w =>
+    content === w ||
+    content.startsWith(w + ' ') ||
+    content.endsWith(' ' + w) ||
+    content.includes(' ' + w + ' ')
+  )) return false;
+
+  // Recherche de besoin/question avec pattern smart
+  const triggerPatterns = [
+    /\?/, // point d'interrogation
+    /\b(comment|pourquoi|peux[- ]tu|peut[- ]on|possible|où|quelle|quand|aide|info|besoin|aidez[- ]moi|help|rp|gta|bug|ticket|demande|cherche|trouve|probl[èe]me|résolution|marche pas|j'ai un souci|qui peut|je veux|je n'arrive pas|comment faire)\b/
+  ];
+  const isTrigger = triggerPatterns.some(reg => reg.test(content));
+  if (!isTrigger) return false;
+
+  // Ignore s'il y a trop peu de mots
+  if (content.split(' ').length < 3) return false;
+
+  return true;
 }
 
-// Prompt ultra renseigné NXST
+// === PROMPT IA NXST (ultra strict, court, jamais HS) ===
 function promptNXST(question, userTag, contexte, salonsList) {
-  // Génère la liste dynamique des salons avec leur lien
   const salonsDispo = salonsList
     .map(s => `- ${s.nom} : <#${s.id}>`)
     .join('\n');
   return `
 Tu es NXST Assistant IA, le chatbot officiel de la communauté NXST RP sur Discord (serveur GTA 5 FiveM). 
-Tu aides exclusivement sur le RP GTA 5, les métiers, le fonctionnement du serveur et les questions sur la vie IG NXST.
-**Ne répond jamais sur autre chose que NXST, GTA 5 RP, ses règles, salons, staff, métiers, jobs, bug report ou events.**
+Tu aides uniquement sur le RP GTA 5, la vie NXST, les salons, métiers, jobs, tickets, bugs, events et règlements.
+Ne répond jamais sur autre chose que NXST/GTA 5 RP et n'interviens jamais dans les discussions entre membres.
 
 **Salons importants :**
 ${salonsDispo}
 
 **Règles strictes :**
-- Réponses ultra courtes (1 à 2 phrases max), ton toujours RP GTA 5, amical, jamais robot.
-- Jamais de hors-sujet, jamais de débat, jamais de blague déplacée.
-- Si la question est HS, réponds "Je ne parle que du RP GTA 5 sur NXST !"
-- Si on te demande un salon précis (même si c’est mal orthographié), fournis le lien direct.
+- Réponds en 1 à 2 phrases maximum, ton RP GTA 5, amical, jamais hors-sujet, jamais de débat ou blague.
+- Si la question sort du RP NXST : "Je ne parle que du RP GTA 5 sur NXST !"
+- Si on te demande un salon, fournis le lien direct même si mal orthographié.
 - Si tu ne sais pas, propose d’ouvrir un ticket ou d’attendre un staff.
 
 **Contexte utilisateur :**
@@ -100,7 +112,7 @@ ${question}
 `.trim();
 }
 
-// Gestion Gemini
+// === APPEL GEMINI (ou autre IA) ===
 async function askGemini(question, userTag, contexte = "") {
   const prompt = promptNXST(question, userTag, contexte, salonsInfos);
 
@@ -125,14 +137,27 @@ async function askGemini(question, userTag, contexte = "") {
   }
 }
 
-// Main event (filtre salons autorisés par ID)
+// === INITIALISATION DU BOT ===
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+});
+
+// === EVENT PRINCIPAL : messageCreate ultra filtré ===
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
   if (!SALONS_AUTORISES.includes(message.channel.id)) return;
 
+  // Filtres stricts : uniquement question/besoin
+  if (!isQuestionOrNeed(message)) return;
+
   addMemoire(message.author.id, message.content, message.channel.name);
 
-  // Cherche si la question concerne un salon connu
+  // Réponse "shortcut" pour demande salon
   let specialReply = null;
   for (const nom in salonsNomVersLien) {
     if (message.content.toLowerCase().includes(nom)) {
